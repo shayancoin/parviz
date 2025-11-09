@@ -1,0 +1,98 @@
+name: Auto Create PR for Feature Branch
+on:
+  push:
+    branches: ['pr-*']
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: auto-pr-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # --- Toolchains (conditional) ---
+      - name: Setup Node
+        if: hashFiles('**/package.json') != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup PNPM
+        if: hashFiles('**/pnpm-lock.yaml') != ''
+        uses: pnpm/action-setup@v4
+        with:
+          version: 8
+
+      - name: Setup Go
+        if: hashFiles('**/go.mod') != ''
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+
+      - name: Setup Python
+        if: hashFiles('**/pyproject.toml') != ''
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # --- Lint/Test (conditional per stack) ---
+      - name: Node install + test
+        if: hashFiles('**/package.json') != ''
+        run: |
+          if [ -f pnpm-lock.yaml ]; then pnpm install --frozen-lockfile && pnpm -r test; else npm ci && npm test; fi
+
+      - name: Go test
+        if: hashFiles('**/go.mod') != ''
+        run: go test ./...
+
+      - name: Python install + test
+        if: hashFiles('**/pyproject.toml') != ''
+        run: |
+          python -m pip install -U pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pytest -q
+
+      # --- Optional auto-commit of any generated files ---
+      - name: Commit changes (if any)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .
+          git diff --quiet || git commit -m "chore: auto-update from workflow"
+
+      # Primary method (works when this job made a commit)
+      - name: Create or update PR
+        id: cpr
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: ${{ github.ref_name }}
+          base: main
+          title: "Auto PR: ${{ github.ref_name }}"
+          body: |
+            Automated PR for branch ${{ github.ref_name }}.
+            Repo: ${{ github.repository }}
+          labels: automated-pr, org-ci
+          draft: false
+
+      # Fallback: create PR even if no new commits were made by this job
+      - name: Create PR (fallback for existing branch)
+        if: steps.cpr.outputs.pull-request-number == ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr create \
+            --base main \
+            --head "${GITHUB_REF_NAME}" \
+            --title "Auto PR: ${GITHUB_REF_NAME}" \
+            --body "Automated PR for branch ${GITHUB_REF_NAME}."
